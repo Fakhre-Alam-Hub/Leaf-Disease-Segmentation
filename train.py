@@ -1,88 +1,137 @@
 import os
+import random
+from glob import glob
 import tensorflow as tf
 from unet import unet_model
-import prepare_dataframe as pdf
-from segmentation_models.losses import bce_jaccard_loss, bce_dice_loss
 from segmentation_models.metrics import iou_score
-import preprocess_pipeline
+from segmentation_models.losses import bce_jaccard_loss, bce_dice_loss
 
-def compile_model():
-    model = unet_model()
-
-    model.compile(optimizer='adam',
-                loss=bce_jaccard_loss,
-                metrics=[iou_score])
-
-    return model
-
-def model_callbacks():
-    early_stop = tf.keras.callbacks.EarlyStopping(
-        patience=5, monitor='val_iou_score',
-        mode='max', restore_best_weights=True
-    )
-
-    checkpoint = tf.keras.callbacks.ModelCheckpoint(
-        filepath='models/model_disease_check.h5', monitor='val_iou_score',
-        verbose=0, save_best_only=True, mode='max'
-    )
-
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='val_iou_score', factor=0.1, patience=5, verbose=0,
-        mode='max', min_delta=0.0001, min_lr=0.00002,
-    )
-
-    tb_callback = tf.keras.callbacks.TensorBoard('models/logs_check/logs')
-
-    return [early_stop, reduce_lr, checkpoint, tb_callback]
+AUTOTUNE = tf.data.AUTOTUNE
 
 
-def fit_model(model, train_batches, test_batches, 
-              STEPS_PER_EPOCH, VALIDATION_STEPS, EPOCHS):
+class LoadPaths:
+    def __init__(self, BASE_DIR, aug_folder_name="aug_data", train_size=0.8, ** kwargs):
+        self.BASE_DIR = BASE_DIR
+        self.aug_folder_name = aug_folder_name
+        self.train_size = train_size
+        super().__init__(**kwargs)
 
-    # callbacks
-    callbacks = model_callbacks()
+    def load_paths(self):
+        image_paths = sorted(
+            glob(os.path.join(self.BASE_DIR, self.aug_folder_name, "images/*")))
+        mask_paths = sorted(
+            glob(os.path.join(self.BASE_DIR, self.aug_folder_name, "masks/*")))
+        return image_paths, mask_paths
 
-    # fit model
-    model_history = model.fit(train_batches, epochs=EPOCHS,
-                            steps_per_epoch=STEPS_PER_EPOCH,
-                            validation_data=test_batches,
-                            validation_steps=VALIDATION_STEPS,
-                            callbacks=callbacks)
+    def train_test_split(self):
+        image_paths, mask_paths = self.load_paths()
+        count = int(len(image_paths)*self.train_size)
+
+        # split in train and test
+        train_images = image_paths[:count]
+        train_masks = mask_paths[:count]
+        test_images = image_paths[count:]
+        test_masks = mask_paths[count:]
+        return train_images, train_masks, test_images, test_masks
 
 
-if __name__ == "__main__":
-    BASE_DIR = os.getcwd()
+class DataLoader:
+    def __init__(self, image_paths, mask_paths, image_size=(256, 256), channels=(3, 1), **kwargs):
+        self.image_paths = image_paths
+        self.mask_paths = mask_paths
+        self.image_size = image_size
+        self.channels = channels
+        super().__init__(**kwargs)
 
-    img_folder = os.path.join(BASE_DIR, 'aug_data/images')
-    mask_folder = os.path.join(BASE_DIR, 'aug_data/masks')
+    def preprocess(self, img_path, mask_path):
+        input_image = tf.io.read_file(img_path)
+        input_image = tf.image.decode_jpeg(
+            input_image, channels=self.channels[0])
+        input_image = tf.image.resize(input_image, self.image_size)
+        input_image = tf.cast(input_image, tf.float32) / 255.0
 
-    df = pdf.get_df(img_folder, mask_folder)
-    train_df, test_df = pdf.split_df(df)
+        input_mask = tf.io.read_file(mask_path)
+        input_mask = tf.image.decode_jpeg(
+            input_mask, channels=self.channels[1])
+        input_mask = tf.image.resize(input_mask, self.image_size)
+        input_mask = tf.math.sign(input_mask)
 
-    train_images = preprocess_pipeline.create_dataset(train_df)
-    test_images = preprocess_pipeline.create_dataset(test_df)
+        return input_image, input_mask
 
-    TRAIN_LENGTH = len(train_df)
-    TEST_LENGTH = len(test_df)
+    def data_batch(self, batch_size, shuffle=False):
+        data = tf.data.Dataset.from_tensor_slices(
+            (self.image_paths, self.mask_paths))
+        data = data.map(self.preprocess, num_parallel_calls=AUTOTUNE)
 
-    print(TRAIN_LENGTH, TEST_LENGTH)
-    BATCH_SIZE = 16
-    BUFFER_SIZE = 500
-    STEPS_PER_EPOCH = TRAIN_LENGTH // BATCH_SIZE
-    VALIDATION_STEPS = TEST_LENGTH // BATCH_SIZE
+        if shuffle:
+            # Prefetch, shuffle then batch
+            data = data.prefetch(AUTOTUNE).shuffle(
+                random.randint(0, len(self.image_paths))).batch(batch_size)
+        else:
+            # Batch and prefetch
+            data = data.batch(batch_size).prefetch(AUTOTUNE)
+        return data
 
-    train_batches = (train_images
-        .cache()
-        .shuffle(BUFFER_SIZE)
-        .batch(BATCH_SIZE)
-        .repeat()
-        .prefetch(buffer_size=tf.data.AUTOTUNE))
 
-    test_batches = test_images.batch(BATCH_SIZE)
+class train(LoadPaths):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-    model = compile_model()
+    def load_data(self):
+        loadpath_obj = LoadPaths(self.BASE_DIR)
+        train_images, train_masks, test_images, test_masks = loadpath_obj.train_test_split()
+        print('Train images count: ', len(train_images), 'Train masks count: ', len(train_masks),
+              '\nTest images count: ', len(test_images), 'Test masks count: ', len(test_masks))
 
-    fit_model(model, train_batches, test_batches,
-              STEPS_PER_EPOCH, VALIDATION_STEPS, EPOCHS=3)
+        train_length = len(train_images)
+        test_length = len(test_images)
 
-    print('Done training.')
+        train_dataset = DataLoader(train_images, train_masks)
+        test_dataset = DataLoader(test_images, test_masks)
+
+        train_batches = train_dataset.data_batch(batch_size=4)
+        test_batches = test_dataset.data_batch(batch_size=4)
+        print('batch done')
+
+        return train_length, test_length, train_batches, test_batches
+
+    def model_callbacks(self):
+        early_stop = tf.keras.callbacks.EarlyStopping(
+            patience=5, monitor='val_iou_score', mode='max', restore_best_weights=True)
+
+        checkpoint = tf.keras.callbacks.ModelCheckpoint(
+            filepath='models/model_disease.h5', monitor='val_iou_score',
+            verbose=0, save_best_only=True, mode='max')
+
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_iou_score', factor=0.1, patience=5, verbose=0,
+            mode='max', min_delta=0.0001, min_lr=0.00002)
+
+        tb_callback = tf.keras.callbacks.TensorBoard('models/logs/logs')
+
+        return [early_stop, checkpoint, reduce_lr, tb_callback]
+
+    def model_train(self, BATCH_SIZE, EPOCH):
+        TRAIN_LENGTH, TEST_LENGTH, train_batches, test_batches = self.load_data()
+        STEPS_PER_EPOCH = TRAIN_LENGTH // BATCH_SIZE
+        VALIDATION_STEPS = TEST_LENGTH // BATCH_SIZE
+
+        # creating object of unet architecture
+        model = unet_model()
+
+        # compile model
+        model.compile(optimizer='adam', loss=bce_jaccard_loss,
+                      metrics=[iou_score])
+
+        # fit model
+        callbacks = self.model_callbacks()
+        model_history = model.fit(train_batches, epochs=EPOCH, steps_per_epoch=STEPS_PER_EPOCH,
+                                  validation_data=test_batches, validation_steps=VALIDATION_STEPS,
+                                  callbacks=callbacks)
+
+
+# Driver Code
+if __name__ == '__main__':
+    base_dir = r"C:\project\Leaf Disease Segmentation\Experiment"
+    tr = train(BASE_DIR=base_dir)
+    tr.model_train(BATCH_SIZE=4, EPOCH=2)
