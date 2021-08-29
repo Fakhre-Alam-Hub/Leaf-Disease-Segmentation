@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+
+{% block title %}Home{% endblock title %}
+
+{% block body %}
+
+<div class="container mt-3">
+    <h4 class="mb-2">Click on the "Choose File" button to upload a file:</h4>
+    
+    <form class="form-inline" action="." enctype="multipart/form-data" method="POST">
+        {% csrf_token %}
+        {{ form.as_p}}
+        <button type="submit" class="btn btn-primary mb-0">Predict</button>
+    </form>
+<hr>
+
+    {% if img_obj %}
+        <h3 class="card text-center">Prediction on Image</h3>
+        <div class="row text-center">
+            <div class="col-sm">
+                <div class="card text-center">
+                    <img src="{{ input_image_uri }}" class="card-img-top" alt="...">
+                    <div class="card-body">
+                        <h5 class="card-title">Original Image</h5>
+                    </div>
+                </div>
+            </div>
+            <div class="col-sm">
+                <div class="card text-center">
+                    <img src="{{ mask_uri }}" class="card-img-top" alt="...">
+                    <div class="card-body">
+                        <h5 class="card-title">Predicted Mask</h5>
+                    </div>
+                </div>
+            </div>
+            <div class="col-sm">
+                <div class="card text-center">
+                    <img src="{{ mask_on_img_uri }}" class="card-img-top" alt="...">
+                    <div class="card-body">
+                        <h5 class="card-title">Mask On Image</h5>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    <hr>
+
+</div>
+
+{% endblock body %}
