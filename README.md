@@ -8,3 +8,5 @@
  *  Annotation of these images are done using [Labelme](https://github.com/wkentaro/labelme)
  *  Datasets are created from annotated json file
  *  Data augmentation is done using [albumentations](https://github.com/albumentations-team/albumentations) library
+
+https://user-images.githubusercontent.com/60462475/140259765-42a66bee-54a3-425d-8a55-f477e82ba143.mp4
